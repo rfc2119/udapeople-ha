@@ -4,12 +4,13 @@
 
 Deploys an HA Application Tier with CloudFormation. Refer to the included diagram image for the resources it deploys. The project advertises an Instagram clone (called Udagram) that is available on a public S3 with JavaScript and HTML files, but I have no idea where these files are created nor where to grab them from
 
+![udacity-project-2.png](udacity-project-2.png)
 
 ## Folder Structure
 ```
-├── stack.yaml									# CloudFormation template file
-├── udacity-project-2.drawio		# raw XML file used to generate the architecture diagram
-└── udacity-project-2.png				# the architecture diagram
+├── stack.yaml                  # CloudFormation template file
+├── udacity-project-2.drawio    # raw XML file used to generate the architecture diagram
+└── udacity-project-2.png       # the architecture diagram
 ```
 
 ## Running
