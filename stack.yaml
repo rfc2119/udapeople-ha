@@ -1,0 +1,444 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Project 2: Deploy a high-availabilty web app using CloudFormation'
+Parameters:
+  InstanceTypeParameter:
+    Type: String
+    Description: "EC2 instance type to use with the autoscaling group"
+    Default: "t3.small"
+  ImageIdParameter:
+    Type: String
+    Description: "Amazon Machine Image (AMI) ID used to launch instances. See [here](https://cloud-images.ubuntu.com/locator/ec2/) for Ubuntu-based AMIs"
+    Default: "ami-0d639d4ce86041be5"  # Ubuntu Focal 20.04 LTS EBS-SSD
+  EncryptEBSVolumes:
+    Type: String
+    Description: "Whether to encrypt newly-created EBS volumes (default is 'false')"
+    Default: false
+
+Resources:
+
+#======================= 
+# Networking components
+#======================= 
+# General guidlines:
+# * Each subnet in your VPC must be associated with a route table (subnet route table)
+# * You can associate multiple subnets with the same subnet route table.
+# * You can optionally associate a route table with an internet gateway or
+#   a virtual private gateway (gateway route table)
+# * A non-default VPC requires setting up route tables and their associations
+# * Destination—The range of IP addresses where you want traffic to go (destination CIDR)
+#
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  #-------------------- 
+  # Subnets
+  #-------------------- 
+  PubSubnet1: 
+    Type: AWS::EC2::Subnet
+    Properties:
+        VpcId: !Ref VPC
+        AvailabilityZone: !Select [ 0, !GetAZs '' ]
+        CidrBlock: 10.0.0.0/24
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: !Ref AWS::StackName
+
+  PubSubnet2: 
+    Type: AWS::EC2::Subnet
+    Properties:
+        VpcId: !Ref VPC
+        AvailabilityZone: !Select [2, !GetAZs '' ]
+        CidrBlock: 10.0.1.0/24
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: Name
+            Value: !Ref AWS::StackName
+
+  PrivSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: PubSubnet1
+    Properties:
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !GetAtt [PubSubnet1, "AvailabilityZone"]
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  PrivSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: PubSubnet2
+    Properties:
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !GetAtt [PubSubnet2, "AvailabilityZone"]
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  #-------------------- 
+  # Gateways
+  #-------------------- 
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  NATGateway1: 
+      Type: AWS::EC2::NatGateway
+      DependsOn: NATGateway1EIP
+      Properties: 
+          AllocationId: !GetAtt NATGateway1EIP.AllocationId
+          SubnetId: !Ref PubSubnet1
+
+  NATGateway2: 
+      Type: AWS::EC2::NatGateway
+      DependsOn: NATGateway2EIP
+      Properties:
+          AllocationId: !GetAtt NATGateway2EIP.AllocationId
+          SubnetId: !Ref PubSubnet2
+
+  #-------------------- 
+  # Elastic IPs
+  #-------------------- 
+  NATGateway1EIP:
+      Type: AWS::EC2::EIP
+      DependsOn: VPCGatewayAttachment
+      Properties: 
+          Domain: vpc
+
+  NATGateway2EIP:
+      Type: AWS::EC2::EIP
+      DependsOn: VPCGatewayAttachment
+      Properties:
+          Domain: vpc
+
+
+  #-------------------- 
+  # Route Tables
+  #-------------------- 
+  # one public route table is needed
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ["", [!Ref AWS::StackName, "-public-rt"]]
+
+  # two route tables for private subnets are required as each one has a route to its nat gateway (located in separate AZs)
+  PrivateRouteTableForAZ1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ["", [!Ref AWS::StackName, "-private-rt1"]]
+
+  PrivateRouteTableForAZ2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join ["", [!Ref AWS::StackName, "-private-rt2"]]
+
+  #-------------------- 
+  # Routes
+  #-------------------- 
+
+  NATGateway1Route:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - NATGateway1
+      - PrivateRouteTableForAZ1
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableForAZ1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
+
+  NATGateway2Route:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - NATGateway2
+      - PrivateRouteTableForAZ2
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableForAZ2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway2
+
+  InternetRoute: 
+      Type: AWS::EC2::Route
+      DependsOn: VPCGatewayAttachment
+      Properties: 
+          RouteTableId: !Ref PublicRouteTable
+          DestinationCidrBlock: 0.0.0.0/0
+          GatewayId: !Ref InternetGateway
+
+
+  #-----------------------
+  # Associations and Links
+  #-----------------------
+
+  # attach the internet gateway to the VPC
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PrivateRouteTableForAZ1
+      - PrivSubnet1
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableForAZ1
+      SubnetId: !Ref PrivSubnet1
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PrivateRouteTableForAZ2
+      - PrivSubnet2
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableForAZ2
+      SubnetId: !Ref PrivSubnet2
+
+  # two associations but one public route table
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PublicRouteTable
+      - PubSubnet1
+      - InternetRoute
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PubSubnet1
+
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - PublicRouteTable
+      - PubSubnet2
+      - InternetRoute
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PubSubnet2
+
+#======================= 
+# Security Groups
+#======================= 
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn:
+      - PrivSubnet1
+      - PrivSubnet2
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Enable HTTP traffic from the load balancer
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId:
+            !Select [0, !GetAtt LoadBalancer.SecurityGroups]
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP traffic from the outside world and allow outbound to HTTP port
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+# ========================
+# IAM Roles and policies
+# ========================
+
+  # the role is created first before the policy. do not specify "Policies" property
+  # tp avoid circular dependencies
+  S3ReadOnlyRoleAssumedByEC2:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+
+  # TODO: bucket should be private and known to the architect before deployment
+  S3ReadOnlyPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: s3-readonly-from-all-buckets-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+            Resource: 'arn:aws:s3:::*'
+      Roles: 
+        - !Ref S3ReadOnlyRoleAssumedByEC2
+
+  WebServerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref S3ReadOnlyRoleAssumedByEC2
+
+# ========================
+# Auto-Scaling components
+# ========================
+
+# TODO: use launch templates not launch configurations. source:
+# 1. https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-launchtemplate.html
+# 2. https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-group.html
+
+  WebServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        # TODO: external .sh file 
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update -y
+          sudo apt-get install apache2 -y
+          sudo systemctl start apache2.service          
+          echo '<h3>It works! Udagram, Udacity<h3>' > /var/www/html/index.html
+      ImageId: !Ref ImageIdParameter
+      SecurityGroups: 
+        - !Ref WebServerSecurityGroup
+      InstanceType: !Ref InstanceTypeParameter
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: '10'
+            Encrypted: !Ref EncryptEBSVolumes
+
+  WebServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - PrivSubnet1
+      - PrivSubnet2
+    Properties:
+      VPCZoneIdentifier:  # Not AvailabilityZones !!! Subnets automatically determine which AZ he group will reside
+        - !Ref PrivSubnet1
+        - !Ref PrivSubnet2
+      LaunchConfigurationName: !Ref WebServerLaunchConfig
+      MinSize: '1'
+      MaxSize: '4'
+      TargetGroupARNs:
+        - Ref: LoadBalancerTargetGroup
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+          PropagateAtLaunch: true
+
+#======================= 
+# Applicaton load balancer
+#======================= 
+          
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      # load balancers are located in public subnets
+      Subnets:
+        - !Ref PubSubnet1
+        - !Ref PubSubnet2
+      # TODO: no need for the security group resource ?
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  # A listener is a process that checks for connection requests, using the protocol and port that you configure. 
+  # An Application Load Balancer need to have one or more listener
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: "forward"
+        TargetGroupArn: !Ref LoadBalancerTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: "HTTP"
+
+  # Each rule consists of a priority, one or more actions, and one or more conditions
+  # When the conditions for a rule are met, then its actions are performed.
+  # Each listener has a default rule that you must define. You can optionally add more rules
+  HTTPListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: "forward"
+          TargetGroupArn: !Ref LoadBalancerTargetGroup
+          # You can add more target groups and requests will be weight-forwarded
+        Conditions:
+        - Field: "path-pattern"
+          Values: [/]
+        ListenerArn: !Ref HTTPListener
+        Priority: 1 # rules are evaluated from lowest to highest
+
+  # Each target group routes requests to one or more registered targets
+  # You can register a target with multiple target groups
+  # You can configure health checks on a per target group basis
+  # Health checks are performed on all targets registered to a target group that is specified in a listener rule
+  LoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      # The approximate amount of time, in seconds, between health checks of an individual target
+      HealthCheckIntervalSeconds: 20
+      # The amount of time, in seconds, during which no response from a target means a failed health check
+      HealthCheckTimeoutSeconds: 6
+      HealthCheckProtocol: HTTP
+      # HealthCheckPort: 80   # port used by ALB for doing health checks. default is "Port"
+      # The port on which the targets receive traffic
+      Port: 80    # TODO: is this used to automatically create ALB security groups ?
+      Protocol: HTTP
+      TargetType: "instance"
+      # The number of consecutive health check failures required before considering a target unhealthy
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+
+
+Outputs:
+  LoadBalancerURL:
+    Description: >
+      The URL of the application load balancer. Traffic should hit any of the instances in the cluster
+    Value: !Join ['', ['http://', !GetAtt LoadBalancer.DNSName]]
